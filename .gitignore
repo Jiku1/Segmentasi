@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.DS_Store
+*.pyc
+data/
+dataset/
+outputs/
+exper/
+*.png
+*.jpg
+*.pth
+*.weights
