@@ -1,80 +1,255 @@
 import os
 import cv2
+import torch
 import numpy as np
 import matplotlib.pyplot as plt
-import torch
+
+from torch.utils.data import DataLoader
 
 
 # =========================
-# COLOR MAP (FIXED)
+# COLOR MAP
 # =========================
-def color_mask(mask):
+COLORS = {
+    0: [0, 0, 0],          # background
+    1: [0, 255, 0],        # Fair
+    2: [255, 255, 0],      # Poor
+    3: [255, 0, 0],        # Severe
+}
+
+
+# =========================
+# MASK → RGB
+# =========================
+def decode_mask(mask):
+
     h, w = mask.shape
-    colored = np.zeros((h, w, 3), dtype=np.uint8)
 
-    # background
-    colored[mask == 0] = [0, 0, 0]
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
 
-    # corrosion classes
-    colored[mask == 1] = [0, 255, 0]      # green
-    colored[mask == 2] = [255, 255, 0]    # yellow
-    colored[mask == 3] = [255, 0, 0]      # red
+    for cls, color in COLORS.items():
+        rgb[mask == cls] = color
 
-    return colored
+    return rgb
 
 
 # =========================
-# VISUALIZATION FUNCTION
+# OVERLAY
 # =========================
-def visualize_publish(model, dataset, save_path, device):
-    os.makedirs(save_path, exist_ok=True)
+def overlay_mask(image, mask_rgb, alpha=0.5):
+
+    image = image.astype(np.uint8)
+
+    overlay = cv2.addWeighted(
+        image,
+        1 - alpha,
+        mask_rgb,
+        alpha,
+        0
+    )
+
+    return overlay
+
+
+# =========================
+# VISUALIZE PREDICTION
+# =========================
+def visualize_prediction(
+    model,
+    dataset,
+    device,
+    save_dir="outputs/qualitative"
+):
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    loader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False
+    )
 
     model.eval()
 
-    for i in range(3):
+    with torch.no_grad():
 
-        img, mask = dataset[i]
+        for idx, (img, mask) in enumerate(loader):
 
-        with torch.no_grad():
-            out = model(img.unsqueeze(0).to(device))
+            img = img.to(device)
 
-            if isinstance(out, dict):
-                out = out.logits
+            outputs = model(img)
 
-        pred = torch.argmax(out, dim=1).squeeze().cpu().numpy()
-        gt = mask.numpy()
+            # =========================
+            # SEGFORMER SAFE
+            # =========================
+            if hasattr(outputs, "logits"):
+                outputs = outputs.logits
 
-        # =========================
-        # IMAGE DENORMALIZATION 
-        # =========================
-        img_np = img.permute(1, 2, 0).cpu().numpy()
-        img_np = np.clip(img_np, 0, 1)
+            preds = torch.argmax(outputs, dim=1)
 
-        gt_color = color_mask(gt)
-        pred_color = color_mask(pred)
+            pred = preds.squeeze().cpu().numpy()
+            gt = mask.squeeze().cpu().numpy()
 
-        # =========================
-        # PLOT
-        # =========================
-        fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+            # =========================
+            # DENORMALIZATION
+            # =========================
+            image = img.squeeze().permute(1, 2, 0).cpu().numpy()
 
-        ax[0].imshow(img_np)
-        ax[0].set_title("Input Image")
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
 
-        ax[1].imshow(gt_color)
-        ax[1].set_title("Ground Truth")
+            image = (image * std) + mean
+            image = np.clip(image, 0, 1)
 
-        ax[2].imshow(pred_color)
-        ax[2].set_title("Prediction")
+            image = (image * 255).astype(np.uint8)
 
-        for a in ax:
-            a.axis("off")
+            # =========================
+            # COLOR MASKS
+            # =========================
+            gt_rgb = decode_mask(gt)
+            pred_rgb = decode_mask(pred)
 
-        plt.tight_layout()
+            overlay = overlay_mask(image, pred_rgb)
 
-        plt.savefig(
-            f"{save_path}/viz_{i}.png",
-            dpi=300,
-            bbox_inches="tight"
+            # =========================
+            # FIGURE
+            # =========================
+            fig, ax = plt.subplots(1, 4, figsize=(18, 5))
+
+            ax[0].imshow(image)
+            ax[0].set_title("Original")
+            ax[0].axis("off")
+
+            ax[1].imshow(gt_rgb)
+            ax[1].set_title("Ground Truth")
+            ax[1].axis("off")
+
+            ax[2].imshow(pred_rgb)
+            ax[2].set_title("Prediction")
+            ax[2].axis("off")
+
+            ax[3].imshow(overlay)
+            ax[3].set_title("Overlay")
+            ax[3].axis("off")
+
+            plt.tight_layout()
+
+            plt.savefig(
+                f"{save_dir}/sample_{idx}.png",
+                dpi=300,
+                bbox_inches="tight"
+            )
+
+            plt.close()
+
+            if idx >= 10:
+                break
+
+
+# =========================
+# VISUALIZE DEGRADATION
+# =========================
+def visualize_degradation(
+    dataset,
+    save_path="outputs/degradation.png"
+):
+
+    img, _ = dataset[0]
+
+    image = img.permute(1, 2, 0).numpy()
+
+    mean = np.array([0.485, 0.456, 0.406])
+    std = np.array([0.229, 0.224, 0.225])
+
+    image = (image * std) + mean
+    image = np.clip(image, 0, 1)
+
+    plt.figure(figsize=(6, 6))
+
+    plt.imshow(image)
+
+    plt.title(dataset.degrade)
+    plt.axis("off")
+
+    os.makedirs("outputs", exist_ok=True)
+
+    plt.savefig(save_path)
+
+    plt.close()
+
+
+# =========================
+# METRIC PLOT
+# =========================
+def plot_metrics(
+    csv_path,
+    save_path="outputs/metric_plot.png"
+):
+
+    import pandas as pd
+
+    df = pd.read_csv(csv_path)
+
+    plt.figure(figsize=(10, 6))
+
+    for model_name in df["model"].unique():
+
+        sub = df[df["model"] == model_name]
+
+        plt.plot(
+            sub["degradation"],
+            sub["IoU_mean"],
+            marker="o",
+            label=model_name
         )
-        plt.close()
+
+    plt.xlabel("Degradation")
+    plt.ylabel("Mean IoU")
+    plt.title("Robustness Analysis")
+
+    plt.legend()
+    plt.grid(True)
+
+    os.makedirs("outputs", exist_ok=True)
+
+    plt.savefig(save_path)
+
+    plt.close()
+
+
+# =========================
+# QUALITATIVE COMPARISON
+# =========================
+def qualitative_comparison(
+    original,
+    gt,
+    pred_unet,
+    pred_segformer,
+    save_path="outputs/qualitative_comparison.png"
+):
+
+    fig, ax = plt.subplots(1, 4, figsize=(20, 5))
+
+    ax[0].imshow(original)
+    ax[0].set_title("Original")
+    ax[0].axis("off")
+
+    ax[1].imshow(gt)
+    ax[1].set_title("Ground Truth")
+    ax[1].axis("off")
+
+    ax[2].imshow(pred_unet)
+    ax[2].set_title("UNet")
+    ax[2].axis("off")
+
+    ax[3].imshow(pred_segformer)
+    ax[3].set_title("SegFormer")
+    ax[3].axis("off")
+
+    plt.tight_layout()
+
+    os.makedirs("outputs", exist_ok=True)
+
+    plt.savefig(save_path)
+
+    plt.close()

@@ -12,21 +12,29 @@ from configs.config import CONFIG
 from datasets.corrosion import CorrosionDataset
 from models.unet import UNet
 from models.segformer import get_segformer
+
 from engine.loop import run_training_experiment
+
+from utils.visualization import (
+    visualize_prediction,
+    visualize_degradation,
+    plot_metrics
+)
 
 
 # =========================
 # EXPERIMENT SWITCH
 # =========================
-RUN_UNET = False
+RUN_UNET = True
 RUN_SEGFORMER = True
-RUN_BOTH = False
+RUN_BOTH = True
 
 
 # =========================
 # DEVICE
 # =========================
 device = CONFIG["device"]
+
 print(f"\nDevice: {device}")
 
 
@@ -50,12 +58,15 @@ models = get_models()
 
 
 # =========================
-# SETTINGS FOLD & SEEDS
+# SETTINGS
 # =========================
-NUM_FOLDS = 3
-SEEDS = [42]
+NUM_FOLDS = 5
 
-#[42, 123, 999]
+SEEDS = [
+    42,
+    123,
+    999
+]
 
 
 # =========================
@@ -73,9 +84,10 @@ degradations = [
 
 
 # =========================
-# OUTPUT
+# OUTPUT DIR
 # =========================
 os.makedirs(CONFIG["save_dir"], exist_ok=True)
+os.makedirs("outputs", exist_ok=True)
 
 
 # =========================
@@ -86,36 +98,55 @@ def load_all_data():
     img_paths = []
     mask_paths = []
 
-    splits = ["train", "validation", "test"]
+    splits = [
+        "train",
+        "validation",
+        "test"
+    ]
 
     for split in splits:
 
-        imgs = sorted(glob.glob(f"data/{split}/images/*"))
-        masks = sorted(glob.glob(f"data/{split}/masks/*"))
+        imgs = sorted(
+            glob.glob(f"data/{split}/images/*")
+        )
+
+        masks = sorted(
+            glob.glob(f"data/{split}/masks/*")
+        )
 
         img_map = {
-            os.path.splitext(os.path.basename(p))[0]: p
+            os.path.splitext(
+                os.path.basename(p)
+            )[0]: p
             for p in imgs
         }
 
         mask_map = {
-            os.path.splitext(os.path.basename(p))[0]: p
+            os.path.splitext(
+                os.path.basename(p)
+            )[0]: p
             for p in masks
         }
 
-        keys = sorted(set(img_map.keys()) & set(mask_map.keys()))
+        keys = sorted(
+            set(img_map.keys()) &
+            set(mask_map.keys())
+        )
 
         for k in keys:
+
             img_paths.append(img_map[k])
             mask_paths.append(mask_map[k])
 
-    print(f"\nTOTAL DATASET: {len(img_paths)} samples")
+    print("\n========================")
+    print(f"TOTAL DATASET: {len(img_paths)}")
+    print("========================")
 
     return img_paths, mask_paths
 
 
 # =========================
-# LOAD ALL DATA
+# LOAD DATA
 # =========================
 all_imgs, all_masks = load_all_data()
 
@@ -137,7 +168,7 @@ results = []
 
 
 # =========================
-# MAIN EXPERIMENT LOOP
+# MAIN LOOP
 # =========================
 for model_name, model_fn in models.items():
 
@@ -151,19 +182,37 @@ for model_name, model_fn in models.items():
         fold_scores = []
 
         # =========================
-        # 5-FOLD CV
+        # K-FOLD CV
         # =========================
         for fold_idx, (train_idx, test_idx) in enumerate(
             kfold.split(all_imgs)
         ):
 
-            print(f"\n----- FOLD {fold_idx + 1}/{NUM_FOLDS} -----")
+            print(
+                f"\n----- "
+                f"FOLD {fold_idx + 1}/{NUM_FOLDS} "
+                f"-----"
+            )
 
-            train_imgs = [all_imgs[i] for i in train_idx]
-            train_masks = [all_masks[i] for i in train_idx]
+            train_imgs = [
+                all_imgs[i]
+                for i in train_idx
+            ]
 
-            test_imgs = [all_imgs[i] for i in test_idx]
-            test_masks = [all_masks[i] for i in test_idx]
+            train_masks = [
+                all_masks[i]
+                for i in train_idx
+            ]
+
+            test_imgs = [
+                all_imgs[i]
+                for i in test_idx
+            ]
+
+            test_masks = [
+                all_masks[i]
+                for i in test_idx
+            ]
 
             seed_scores = []
 
@@ -172,10 +221,14 @@ for model_name, model_fn in models.items():
             # =========================
             for seed in SEEDS:
 
-                print(f"Seed: {seed}")
+                print(f"\nSeed: {seed}")
 
+                # =========================
+                # FIX RANDOMNESS
+                # =========================
                 random.seed(seed)
                 np.random.seed(seed)
+
                 torch.manual_seed(seed)
 
                 if torch.cuda.is_available():
@@ -200,6 +253,9 @@ for model_name, model_fn in models.items():
                     degrade=deg
                 )
 
+                # =========================
+                # DATALOADER
+                # =========================
                 train_loader = DataLoader(
                     train_ds,
                     batch_size=CONFIG["batch_size"],
@@ -219,7 +275,9 @@ for model_name, model_fn in models.items():
                 # =========================
                 # MODEL RESET
                 # =========================
-                model = model_fn(num_classes=4).to(device)
+                model = model_fn(
+                    num_classes=4
+                ).to(device)
 
                 optimizer = torch.optim.Adam(
                     model.parameters(),
@@ -230,11 +288,14 @@ for model_name, model_fn in models.items():
 
                 save_path = (
                     f"{CONFIG['save_dir']}/"
-                    f"{model_name}_{deg}_fold{fold_idx+1}_seed{seed}.pth"
+                    f"{model_name}_"
+                    f"{deg}_"
+                    f"fold{fold_idx+1}_"
+                    f"seed{seed}.pth"
                 )
 
                 # =========================
-                # TRAIN + EVALUATE
+                # TRAIN
                 # =========================
                 best_iou = run_training_experiment(
                     model=model,
@@ -249,13 +310,45 @@ for model_name, model_fn in models.items():
 
                 seed_scores.append(best_iou)
 
+                # =========================
+                # VISUALIZATION
+                # =========================
+                visualize_prediction(
+                    model=model,
+                    dataset=test_ds,
+                    device=device,
+                    save_dir=(
+                        f"outputs/"
+                        f"{model_name}_"
+                        f"{deg}_"
+                        f"fold{fold_idx+1}_"
+                        f"seed{seed}"
+                    )
+                )
+
+                visualize_degradation(
+                    dataset=test_ds,
+                    save_path=(
+                        f"outputs/"
+                        f"{model_name}_"
+                        f"{deg}_"
+                        f"fold{fold_idx+1}_"
+                        f"seed{seed}_"
+                        f"degradation.png"
+                    )
+                )
+
             # =========================
             # FOLD SCORE
             # =========================
             fold_mean = np.mean(seed_scores)
+
             fold_scores.append(fold_mean)
 
-            print(f"Fold IoU: {fold_mean:.4f}")
+            print(
+                f"\nFold Result "
+                f"| IoU: {fold_mean:.4f}"
+            )
 
         # =========================
         # FINAL STATS
@@ -270,9 +363,15 @@ for model_name, model_fn in models.items():
             std_iou
         ])
 
+        print("\n========================")
+        print("FINAL RESULT")
+        print("========================")
+
         print(
-            f"\nFINAL RESULT | "
-            f"IoU: {mean_iou:.4f} ± {std_iou:.4f}"
+            f"IoU: "
+            f"{mean_iou:.4f} "
+            f"± "
+            f"{std_iou:.4f}"
         )
 
 
@@ -289,8 +388,21 @@ df = pd.DataFrame(
     ]
 )
 
-csv_path = f"{CONFIG['save_dir']}/kfold_results.csv"
-df.to_csv(csv_path, index=False)
+csv_path = (
+    f"{CONFIG['save_dir']}/"
+    f"kfold_results.csv"
+)
+
+df.to_csv(
+    csv_path,
+    index=False
+)
+
+
+# =========================
+# METRIC PLOT
+# =========================
+plot_metrics(csv_path)
 
 
 # =========================
@@ -299,5 +411,7 @@ df.to_csv(csv_path, index=False)
 print("\n========================")
 print("EXPERIMENT FINISHED")
 print("========================")
+
 print(df)
+
 print(f"\nSaved to: {csv_path}")

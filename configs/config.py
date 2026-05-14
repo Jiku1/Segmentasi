@@ -12,7 +12,7 @@ CONFIG = {
     # TRAINING
     # =========================
     "batch_size": 4,
-    "epochs": 8 if DEBUG else 20,
+    "epochs": 1 if DEBUG else 20,
     "lr": 1e-4,
     "patience": 3 if DEBUG else 5,
 
