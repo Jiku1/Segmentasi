@@ -1,7 +1,11 @@
 import os
+import glob
+import random
 import numpy as np
 import pandas as pd
 import torch
+
+from sklearn.model_selection import KFold
 from torch.utils.data import DataLoader
 
 from configs.config import CONFIG
@@ -25,51 +29,12 @@ RUN_BOTH = False
 device = CONFIG["device"]
 print(f"\nDevice: {device}")
 
-print("\n========================")
-print("EXPERIMENT MODE")
-print("========================")
-print(f"UNET: {RUN_UNET}")
-print(f"SEGFORMER: {RUN_SEGFORMER}")
-print(f"BOTH: {RUN_BOTH}")
-print("========================\n")
-
-
-os.makedirs(CONFIG["save_dir"], exist_ok=True)
-
 
 # =========================
-# DATA LOADER UTILITY
-# =========================
-def build_dataset(img_dir, mask_dir):
-    import glob
-
-    imgs = sorted(glob.glob(f"{img_dir}/*"))
-    masks = sorted(glob.glob(f"{mask_dir}/*"))
-
-    img_map = {os.path.splitext(os.path.basename(p))[0]: p for p in imgs}
-    mask_map = {os.path.splitext(os.path.basename(p))[0]: p for p in masks}
-
-    keys = sorted(set(img_map.keys()) & set(mask_map.keys()))
-
-    paired_imgs = [img_map[k] for k in keys]
-    paired_masks = [mask_map[k] for k in keys]
-
-    print(f"{img_dir} → {len(paired_imgs)} samples")
-
-    return paired_imgs, paired_masks
-
-
-# =========================
-# LOAD DATA
-# =========================
-train_imgs, train_masks = build_dataset("data/train/images", "data/train/masks")
-val_imgs, val_masks     = build_dataset("data/validation/images", "data/validation/masks")
-
-
-# =========================
-# MODEL SELECTOR (ON/OFF SYSTEM)
+# MODEL SELECTOR
 # =========================
 def get_models():
+
     models = {}
 
     if RUN_BOTH or RUN_UNET:
@@ -85,7 +50,16 @@ models = get_models()
 
 
 # =========================
-# DEGRADATIONS
+# SETTINGS FOLD & SEEDS
+# =========================
+NUM_FOLDS = 3
+SEEDS = [42]
+
+#[42, 123, 999]
+
+
+# =========================
+# DEGRADATION SCENARIOS
 # =========================
 degradations = [
     "none",
@@ -99,99 +73,231 @@ degradations = [
 
 
 # =========================
+# OUTPUT
+# =========================
+os.makedirs(CONFIG["save_dir"], exist_ok=True)
+
+
+# =========================
+# LOAD ALL DATASET
+# =========================
+def load_all_data():
+
+    img_paths = []
+    mask_paths = []
+
+    splits = ["train", "validation", "test"]
+
+    for split in splits:
+
+        imgs = sorted(glob.glob(f"data/{split}/images/*"))
+        masks = sorted(glob.glob(f"data/{split}/masks/*"))
+
+        img_map = {
+            os.path.splitext(os.path.basename(p))[0]: p
+            for p in imgs
+        }
+
+        mask_map = {
+            os.path.splitext(os.path.basename(p))[0]: p
+            for p in masks
+        }
+
+        keys = sorted(set(img_map.keys()) & set(mask_map.keys()))
+
+        for k in keys:
+            img_paths.append(img_map[k])
+            mask_paths.append(mask_map[k])
+
+    print(f"\nTOTAL DATASET: {len(img_paths)} samples")
+
+    return img_paths, mask_paths
+
+
+# =========================
+# LOAD ALL DATA
+# =========================
+all_imgs, all_masks = load_all_data()
+
+
+# =========================
+# K-FOLD
+# =========================
+kfold = KFold(
+    n_splits=NUM_FOLDS,
+    shuffle=True,
+    random_state=42
+)
+
+
+# =========================
 # RESULTS
 # =========================
 results = []
 
 
 # =========================
-# EXPERIMENT LOOP
+# MAIN EXPERIMENT LOOP
 # =========================
 for model_name, model_fn in models.items():
 
     for deg in degradations:
 
-        print(f"\n=== {model_name} | {deg} ===")
+        print("\n========================")
+        print(f"MODEL: {model_name}")
+        print(f"DEGRADATION: {deg}")
+        print("========================")
 
-        seed_scores = []
-
-        for seed in [42]:
-
-            torch.manual_seed(seed)
-            np.random.seed(seed)
-
-            # =========================
-            # DATASET
-            # =========================
-            train_ds = CorrosionDataset(train_imgs, train_masks, degrade=deg)
-            val_ds   = CorrosionDataset(val_imgs, val_masks, degrade="none")
-
-            train_loader = DataLoader(
-                train_ds,
-                batch_size=CONFIG["batch_size"],
-                shuffle=True,
-                num_workers=CONFIG["num_workers"],
-                pin_memory=CONFIG["pin_memory"]
-            )
-
-            val_loader = DataLoader(
-                val_ds,
-                batch_size=CONFIG["batch_size"],
-                shuffle=False,
-                num_workers=CONFIG["num_workers"],
-                pin_memory=CONFIG["pin_memory"]
-            )
-
-            # =========================
-            # MODEL (FIX SEGFORMER HERE)
-            # =========================
-            model = model_fn(num_classes=4).to(device)
-
-            optimizer = torch.optim.Adam(model.parameters(), lr=CONFIG["lr"])
-            criterion = torch.nn.CrossEntropyLoss()
-
-            save_path = f"{CONFIG['save_dir']}/{model_name}_{deg}.pth"
-
-            # =========================
-            # TRAIN
-            # =========================
-            best_iou = run_training_experiment(
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                optimizer=optimizer,
-                criterion=criterion,
-                device=device,
-                epochs=CONFIG["epochs"],
-                save_path=save_path
-            )
-
-            seed_scores.append(best_iou)
+        fold_scores = []
 
         # =========================
-        # STATS 
+        # 5-FOLD CV
         # =========================
-        mean_iou = np.mean(seed_scores)
-        std_iou = np.std(seed_scores)
+        for fold_idx, (train_idx, test_idx) in enumerate(
+            kfold.split(all_imgs)
+        ):
 
-        results.append([model_name, deg, mean_iou, std_iou])
+            print(f"\n----- FOLD {fold_idx + 1}/{NUM_FOLDS} -----")
 
-        print(f"Final IoU: {mean_iou:.4f} ± {std_iou:.4f}")
+            train_imgs = [all_imgs[i] for i in train_idx]
+            train_masks = [all_masks[i] for i in train_idx]
+
+            test_imgs = [all_imgs[i] for i in test_idx]
+            test_masks = [all_masks[i] for i in test_idx]
+
+            seed_scores = []
+
+            # =========================
+            # MULTI-SEED
+            # =========================
+            for seed in SEEDS:
+
+                print(f"Seed: {seed}")
+
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+
+                # =========================
+                # DATASET
+                # =========================
+                train_ds = CorrosionDataset(
+                    train_imgs,
+                    train_masks,
+                    degrade="none"
+                )
+
+                # degradation ONLY on test
+                test_ds = CorrosionDataset(
+                    test_imgs,
+                    test_masks,
+                    degrade=deg
+                )
+
+                train_loader = DataLoader(
+                    train_ds,
+                    batch_size=CONFIG["batch_size"],
+                    shuffle=True,
+                    num_workers=CONFIG["num_workers"],
+                    pin_memory=CONFIG["pin_memory"]
+                )
+
+                test_loader = DataLoader(
+                    test_ds,
+                    batch_size=CONFIG["batch_size"],
+                    shuffle=False,
+                    num_workers=CONFIG["num_workers"],
+                    pin_memory=CONFIG["pin_memory"]
+                )
+
+                # =========================
+                # MODEL RESET
+                # =========================
+                model = model_fn(num_classes=4).to(device)
+
+                optimizer = torch.optim.Adam(
+                    model.parameters(),
+                    lr=CONFIG["lr"]
+                )
+
+                criterion = torch.nn.CrossEntropyLoss()
+
+                save_path = (
+                    f"{CONFIG['save_dir']}/"
+                    f"{model_name}_{deg}_fold{fold_idx+1}_seed{seed}.pth"
+                )
+
+                # =========================
+                # TRAIN + EVALUATE
+                # =========================
+                best_iou = run_training_experiment(
+                    model=model,
+                    train_loader=train_loader,
+                    val_loader=test_loader,
+                    optimizer=optimizer,
+                    criterion=criterion,
+                    device=device,
+                    epochs=CONFIG["epochs"],
+                    save_path=save_path
+                )
+
+                seed_scores.append(best_iou)
+
+            # =========================
+            # FOLD SCORE
+            # =========================
+            fold_mean = np.mean(seed_scores)
+            fold_scores.append(fold_mean)
+
+            print(f"Fold IoU: {fold_mean:.4f}")
+
+        # =========================
+        # FINAL STATS
+        # =========================
+        mean_iou = np.mean(fold_scores)
+        std_iou = np.std(fold_scores)
+
+        results.append([
+            model_name,
+            deg,
+            mean_iou,
+            std_iou
+        ])
+
+        print(
+            f"\nFINAL RESULT | "
+            f"IoU: {mean_iou:.4f} ± {std_iou:.4f}"
+        )
 
 
 # =========================
-# SAVE RESULT
+# SAVE CSV
 # =========================
 df = pd.DataFrame(
     results,
-    columns=["model", "degradation", "IoU_mean", "IoU_std"]
+    columns=[
+        "model",
+        "degradation",
+        "IoU_mean",
+        "IoU_std"
+    ]
 )
 
-output_path = f"{CONFIG['save_dir']}/thesis_results.csv"
-df.to_csv(output_path, index=False)
+csv_path = f"{CONFIG['save_dir']}/kfold_results.csv"
+df.to_csv(csv_path, index=False)
 
+
+# =========================
+# DONE
+# =========================
 print("\n========================")
-print("DONE")
+print("EXPERIMENT FINISHED")
 print("========================")
 print(df)
-print(f"\nSaved to: {output_path}")
+print(f"\nSaved to: {csv_path}")
