@@ -19,7 +19,7 @@ CONFIG = {
     # =========================
     # SYSTEM
     # =========================
-    "device": "mps" if torch.backends.mps.is_available() else "cpu",
+    "device": "cpu", #"mps" if torch.backends.mps.is_available() else "cpu",
     "num_workers": 0,         
     "pin_memory": False,   
 

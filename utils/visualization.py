@@ -5,21 +5,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 
 # =========================
 # COLOR MAP
 # =========================
 COLORS = {
-    0: [0, 0, 0],          # background
-    1: [0, 255, 0],        # Fair
-    2: [255, 255, 0],      # Poor
-    3: [255, 0, 0],        # Severe
+    0: [0, 0, 0],        # background
+    1: [0, 255, 0],      # Fair
+    2: [255, 255, 0],    # Poor
+    3: [255, 0, 0],      # Severe
 }
 
 
 # =========================
-# MASK → RGB
+# MASK -> RGB
 # =========================
 def decode_mask(mask):
 
@@ -34,11 +35,21 @@ def decode_mask(mask):
 
 
 # =========================
-# OVERLAY
+# SAFE OVERLAY
 # =========================
 def overlay_mask(image, mask_rgb, alpha=0.5):
 
+    # ensure same shape
+    if image.shape[:2] != mask_rgb.shape[:2]:
+
+        mask_rgb = cv2.resize(
+            mask_rgb,
+            (image.shape[1], image.shape[0]),
+            interpolation=cv2.INTER_NEAREST
+        )
+
     image = image.astype(np.uint8)
+    mask_rgb = mask_rgb.astype(np.uint8)
 
     overlay = cv2.addWeighted(
         image,
@@ -49,6 +60,17 @@ def overlay_mask(image, mask_rgb, alpha=0.5):
     )
 
     return overlay
+
+
+# =========================
+# EXTRACT LOGITS
+# =========================
+def extract_logits(outputs):
+
+    if hasattr(outputs, "logits"):
+        return outputs.logits
+
+    return outputs
 
 
 # =========================
@@ -78,20 +100,25 @@ def visualize_prediction(
             img = img.to(device)
 
             outputs = model(img)
+            logits = extract_logits(outputs)
 
             # =========================
-            # SEGFORMER SAFE
+            # UPSAMPLE SEGFORMER OUTPUT
             # =========================
-            if hasattr(outputs, "logits"):
-                outputs = outputs.logits
+            logits = F.interpolate(
+                logits,
+                size=mask.shape[-2:],
+                mode="bilinear",
+                align_corners=False
+            )
 
-            preds = torch.argmax(outputs, dim=1)
+            preds = torch.argmax(logits, dim=1)
 
             pred = preds.squeeze().cpu().numpy()
             gt = mask.squeeze().cpu().numpy()
 
             # =========================
-            # DENORMALIZATION
+            # IMAGE DENORMALIZATION
             # =========================
             image = img.squeeze().permute(1, 2, 0).cpu().numpy()
 
@@ -104,7 +131,7 @@ def visualize_prediction(
             image = (image * 255).astype(np.uint8)
 
             # =========================
-            # COLOR MASKS
+            # RGB MASKS
             # =========================
             gt_rgb = decode_mask(gt)
             pred_rgb = decode_mask(pred)
@@ -112,7 +139,7 @@ def visualize_prediction(
             overlay = overlay_mask(image, pred_rgb)
 
             # =========================
-            # FIGURE
+            # PLOT
             # =========================
             fig, ax = plt.subplots(1, 4, figsize=(18, 5))
 
@@ -167,14 +194,12 @@ def visualize_degradation(
     plt.figure(figsize=(6, 6))
 
     plt.imshow(image)
-
     plt.title(dataset.degrade)
     plt.axis("off")
 
     os.makedirs("outputs", exist_ok=True)
 
     plt.savefig(save_path)
-
     plt.close()
 
 
@@ -213,43 +238,4 @@ def plot_metrics(
     os.makedirs("outputs", exist_ok=True)
 
     plt.savefig(save_path)
-
-    plt.close()
-
-
-# =========================
-# QUALITATIVE COMPARISON
-# =========================
-def qualitative_comparison(
-    original,
-    gt,
-    pred_unet,
-    pred_segformer,
-    save_path="outputs/qualitative_comparison.png"
-):
-
-    fig, ax = plt.subplots(1, 4, figsize=(20, 5))
-
-    ax[0].imshow(original)
-    ax[0].set_title("Original")
-    ax[0].axis("off")
-
-    ax[1].imshow(gt)
-    ax[1].set_title("Ground Truth")
-    ax[1].axis("off")
-
-    ax[2].imshow(pred_unet)
-    ax[2].set_title("UNet")
-    ax[2].axis("off")
-
-    ax[3].imshow(pred_segformer)
-    ax[3].set_title("SegFormer")
-    ax[3].axis("off")
-
-    plt.tight_layout()
-
-    os.makedirs("outputs", exist_ok=True)
-
-    plt.savefig(save_path)
-
     plt.close()

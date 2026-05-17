@@ -42,4 +42,4 @@ plt.xticks(rotation=20)
 plt.tight_layout()
 plt.savefig("./outputs/iou_std.png", dpi=300)
 
-print("✅ Grafik berhasil disimpan di folder outputs/")
+print(" Grafik berhasil disimpan di folder outputs/")

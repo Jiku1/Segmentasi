@@ -5,413 +5,241 @@ import numpy as np
 import pandas as pd
 import torch
 
-from sklearn.model_selection import KFold
+from sklearn.model_selection import train_test_split, KFold
 from torch.utils.data import DataLoader
 
 from configs.config import CONFIG
 from datasets.corrosion import CorrosionDataset
 from models.unet import UNet
 from models.segformer import get_segformer
-
 from engine.loop import run_training_experiment
-
-from utils.visualization import (
-    visualize_prediction,
-    visualize_degradation,
-    plot_metrics
-)
+from utils.visualization import plot_metrics
+from utils.device import get_device
 
 
-# =========================
-# EXPERIMENT SWITCH
-# =========================
-RUN_UNET = True
+# =====================================================
+# ENV
+# =====================================================
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+
+
+# =====================================================
+# CONFIG
+# =====================================================
+RUN_UNET = False
 RUN_SEGFORMER = True
-RUN_BOTH = True
+
+NUM_FOLDS = 5
+SEEDS = [42, 123, 999]
+
+DEGRADATIONS = [
+    "none", "noise", "blur",
+    "compression", "gamma", "shadow", "glare"
+]
 
 
-# =========================
+# =====================================================
 # DEVICE
-# =========================
-device = CONFIG["device"]
-
+# =====================================================
+device, _ = get_device()
 print(f"\nDevice: {device}")
 
 
-# =========================
-# MODEL SELECTOR
-# =========================
-def get_models():
-
-    models = {}
-
-    if RUN_BOTH or RUN_UNET:
-        models["unet"] = UNet
-
-    if RUN_BOTH or RUN_SEGFORMER:
-        models["segformer"] = get_segformer
-
-    return models
+# =====================================================
+# SAFE MKDIR
+# =====================================================
+def safe_mkdir(path):
+    os.makedirs(path, exist_ok=True)
 
 
-models = get_models()
+safe_mkdir(CONFIG["save_dir"])
+safe_mkdir("outputs")
+safe_mkdir("checkpoints")
 
 
-# =========================
-# SETTINGS
-# =========================
-NUM_FOLDS = 5
-
-SEEDS = [
-    42,
-    123,
-    999
-]
-
-
-# =========================
-# DEGRADATION SCENARIOS
-# =========================
-degradations = [
-    "none",
-    "noise",
-    "blur",
-    "compression",
-    "gamma",
-    "shadow",
-    "glare"
-]
+# =====================================================
+# SEED CONTROL
+# =====================================================
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
-# =========================
-# OUTPUT DIR
-# =========================
-os.makedirs(CONFIG["save_dir"], exist_ok=True)
-os.makedirs("outputs", exist_ok=True)
-
-
-# =========================
-# LOAD ALL DATASET
-# =========================
+# =====================================================
+# LOAD DATA (ROBUST VERSION)
+# =====================================================
 def load_all_data():
 
-    img_paths = []
-    mask_paths = []
+    imgs, masks = [], []
+    splits = ["train", "validation", "test"]
 
-    splits = [
-        "train",
-        "validation",
-        "test"
-    ]
+    print("\n================ DATA LOADING ================")
 
     for split in splits:
 
-        imgs = sorted(
-            glob.glob(f"data/{split}/images/*")
-        )
+        img_dir = f"data/{split}/images"
+        mask_dir = f"data/{split}/masks"
 
-        masks = sorted(
-            glob.glob(f"data/{split}/masks/*")
-        )
+        if not os.path.exists(img_dir) or not os.path.exists(mask_dir):
+            print(f"[SKIP] Missing folder: {split}")
+            continue
 
-        img_map = {
-            os.path.splitext(
-                os.path.basename(p)
-            )[0]: p
-            for p in imgs
-        }
+        img_files = sorted(glob.glob(f"{img_dir}/*"))
+        mask_files = sorted(glob.glob(f"{mask_dir}/*"))
 
-        mask_map = {
-            os.path.splitext(
-                os.path.basename(p)
-            )[0]: p
-            for p in masks
-        }
+        print(f"\n[{split}] images: {len(img_files)} masks: {len(mask_files)}")
 
-        keys = sorted(
-            set(img_map.keys()) &
-            set(mask_map.keys())
-        )
+        def key(p):
+            return os.path.splitext(os.path.basename(p))[0]
+
+        img_map = {key(p): p for p in img_files}
+        mask_map = {key(p): p for p in mask_files}
+
+        keys = sorted(set(img_map.keys()) & set(mask_map.keys()))
+
+        print(f"matched pairs: {len(keys)}")
 
         for k in keys:
+            imgs.append(img_map[k])
+            masks.append(mask_map[k])
 
-            img_paths.append(img_map[k])
-            mask_paths.append(mask_map[k])
+    print("\nTOTAL DATASET:", len(imgs))
 
-    print("\n========================")
-    print(f"TOTAL DATASET: {len(img_paths)}")
-    print("========================")
+    if len(imgs) == 0:
+        raise RuntimeError("Dataset kosong. Cek folder data/")
 
-    return img_paths, mask_paths
-
-
-# =========================
-# LOAD DATA
-# =========================
-all_imgs, all_masks = load_all_data()
+    return imgs, masks
 
 
-# =========================
-# K-FOLD
-# =========================
-kfold = KFold(
-    n_splits=NUM_FOLDS,
-    shuffle=True,
-    random_state=42
-)
+# =====================================================
+# MODEL FACTORY
+# =====================================================
+def get_models():
+    models = {}
+    if RUN_UNET:
+        models["unet"] = UNet
+    if RUN_SEGFORMER:
+        models["segformer"] = get_segformer
+    return models
 
 
-# =========================
-# RESULTS
-# =========================
-results = []
+# =====================================================
+# MAIN PIPELINE
+# =====================================================
+def main():
 
+    all_imgs, all_masks = load_all_data()
 
-# =========================
-# MAIN LOOP
-# =========================
-for model_name, model_fn in models.items():
+    # =================================================
+    # 80/20 SPLIT (FIXED TEST SET)
+    # =================================================
+    trainval_imgs, test_imgs, trainval_masks, test_masks = train_test_split(
+        all_imgs,
+        all_masks,
+        test_size=0.2,
+        random_state=42
+    )
 
-    for deg in degradations:
+    print(f"\nTrainVal: {len(trainval_imgs)} | Test: {len(test_imgs)}")
 
-        print("\n========================")
-        print(f"MODEL: {model_name}")
-        print(f"DEGRADATION: {deg}")
-        print("========================")
+    kfold = KFold(n_splits=NUM_FOLDS, shuffle=True, random_state=42)
 
-        fold_scores = []
+    results = []
 
-        # =========================
-        # K-FOLD CV
-        # =========================
-        for fold_idx, (train_idx, test_idx) in enumerate(
-            kfold.split(all_imgs)
-        ):
+    # =================================================
+    # MODEL LOOP
+    # =================================================
+    for model_name, model_fn in get_models().items():
 
-            print(
-                f"\n----- "
-                f"FOLD {fold_idx + 1}/{NUM_FOLDS} "
-                f"-----"
-            )
+        print(f"\n================ MODEL: {model_name} ================")
 
-            train_imgs = [
-                all_imgs[i]
-                for i in train_idx
-            ]
+        for deg in DEGRADATIONS:
 
-            train_masks = [
-                all_masks[i]
-                for i in train_idx
-            ]
+            print(f"\n---- Degradation: {deg} ----")
 
-            test_imgs = [
-                all_imgs[i]
-                for i in test_idx
-            ]
+            fold_scores = []
 
-            test_masks = [
-                all_masks[i]
-                for i in test_idx
-            ]
+            # =============================================
+            # K-FOLD ONLY ON TRAINVAL
+            # =============================================
+            for fold, (tr_idx, val_idx) in enumerate(kfold.split(trainval_imgs)):
 
-            seed_scores = []
+                print(f"\nFold {fold+1}/{NUM_FOLDS}")
 
-            # =========================
-            # MULTI-SEED
-            # =========================
-            for seed in SEEDS:
+                tr_imgs = [trainval_imgs[i] for i in tr_idx]
+                tr_masks = [trainval_masks[i] for i in tr_idx]
 
-                print(f"\nSeed: {seed}")
+                val_imgs = [trainval_imgs[i] for i in val_idx]
+                val_masks = [trainval_masks[i] for i in val_idx]
 
-                # =========================
-                # FIX RANDOMNESS
-                # =========================
-                random.seed(seed)
-                np.random.seed(seed)
+                seed_scores = []
 
-                torch.manual_seed(seed)
+                # =========================================
+                # SEED LOOP
+                # =========================================
+                for seed in SEEDS:
 
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
+                    set_seed(seed)
 
-                torch.backends.cudnn.deterministic = True
-                torch.backends.cudnn.benchmark = False
+                    train_ds = CorrosionDataset(tr_imgs, tr_masks, degrade="none")
+                    val_ds = CorrosionDataset(val_imgs, val_masks, degrade=deg)
 
-                # =========================
-                # DATASET
-                # =========================
-                train_ds = CorrosionDataset(
-                    train_imgs,
-                    train_masks,
-                    degrade="none"
-                )
+                    train_loader = DataLoader(train_ds, batch_size=4, shuffle=True)
+                    val_loader = DataLoader(val_ds, batch_size=4, shuffle=False)
 
-                # degradation ONLY on test
-                test_ds = CorrosionDataset(
-                    test_imgs,
-                    test_masks,
-                    degrade=deg
-                )
+                    model = model_fn(num_classes=4).to(device)
 
-                # =========================
-                # DATALOADER
-                # =========================
-                train_loader = DataLoader(
-                    train_ds,
-                    batch_size=CONFIG["batch_size"],
-                    shuffle=True,
-                    num_workers=CONFIG["num_workers"],
-                    pin_memory=CONFIG["pin_memory"]
-                )
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+                    criterion = torch.nn.CrossEntropyLoss()
 
-                test_loader = DataLoader(
-                    test_ds,
-                    batch_size=CONFIG["batch_size"],
-                    shuffle=False,
-                    num_workers=CONFIG["num_workers"],
-                    pin_memory=CONFIG["pin_memory"]
-                )
+                    save_path = f"checkpoints/{model_name}_{deg}_f{fold}_s{seed}.pth"
 
-                # =========================
-                # MODEL RESET
-                # =========================
-                model = model_fn(
-                    num_classes=4
-                ).to(device)
-
-                optimizer = torch.optim.Adam(
-                    model.parameters(),
-                    lr=CONFIG["lr"]
-                )
-
-                criterion = torch.nn.CrossEntropyLoss()
-
-                save_path = (
-                    f"{CONFIG['save_dir']}/"
-                    f"{model_name}_"
-                    f"{deg}_"
-                    f"fold{fold_idx+1}_"
-                    f"seed{seed}.pth"
-                )
-
-                # =========================
-                # TRAIN
-                # =========================
-                best_iou = run_training_experiment(
-                    model=model,
-                    train_loader=train_loader,
-                    val_loader=test_loader,
-                    optimizer=optimizer,
-                    criterion=criterion,
-                    device=device,
-                    epochs=CONFIG["epochs"],
-                    save_path=save_path
-                )
-
-                seed_scores.append(best_iou)
-
-                # =========================
-                # VISUALIZATION
-                # =========================
-                visualize_prediction(
-                    model=model,
-                    dataset=test_ds,
-                    device=device,
-                    save_dir=(
-                        f"outputs/"
-                        f"{model_name}_"
-                        f"{deg}_"
-                        f"fold{fold_idx+1}_"
-                        f"seed{seed}"
+                    output = run_training_experiment(
+                        model,
+                        train_loader,
+                        val_loader,
+                        optimizer,
+                        criterion,
+                        device,
+                        CONFIG["epochs"],
+                        save_path
                     )
-                )
 
-                visualize_degradation(
-                    dataset=test_ds,
-                    save_path=(
-                        f"outputs/"
-                        f"{model_name}_"
-                        f"{deg}_"
-                        f"fold{fold_idx+1}_"
-                        f"seed{seed}_"
-                        f"degradation.png"
-                    )
-                )
+                    # =========================
+                    # SAFE READ
+                    # =========================
+                    best_iou = output.get("best_iou", None)
 
-            # =========================
-            # FOLD SCORE
-            # =========================
-            fold_mean = np.mean(seed_scores)
+                    if best_iou is None:
+                        best_iou = max(output["history"]["iou"])
 
-            fold_scores.append(fold_mean)
+                    seed_scores.append(best_iou)
 
-            print(
-                f"\nFold Result "
-                f"| IoU: {fold_mean:.4f}"
-            )
+                fold_scores.append(np.mean(seed_scores))
 
-        # =========================
-        # FINAL STATS
-        # =========================
-        mean_iou = np.mean(fold_scores)
-        std_iou = np.std(fold_scores)
+            mean_iou = np.mean(fold_scores)
+            std_iou = np.std(fold_scores)
 
-        results.append([
-            model_name,
-            deg,
-            mean_iou,
-            std_iou
-        ])
+            results.append([model_name, deg, mean_iou, std_iou])
 
-        print("\n========================")
-        print("FINAL RESULT")
-        print("========================")
+            print(f"\nIoU: {mean_iou:.4f} ± {std_iou:.4f}")
 
-        print(
-            f"IoU: "
-            f"{mean_iou:.4f} "
-            f"± "
-            f"{std_iou:.4f}"
-        )
+    # =================================================
+    # SAVE RESULT
+    # =================================================
+    df = pd.DataFrame(results, columns=["model", "degradation", "IoU_mean", "IoU_std"])
+
+    csv_path = "results_kfold.csv"
+    df.to_csv(csv_path, index=False)
+
+    plot_metrics(csv_path)
+
+    print("\nEXPERIMENT DONE")
+    print(df)
 
 
-# =========================
-# SAVE CSV
-# =========================
-df = pd.DataFrame(
-    results,
-    columns=[
-        "model",
-        "degradation",
-        "IoU_mean",
-        "IoU_std"
-    ]
-)
-
-csv_path = (
-    f"{CONFIG['save_dir']}/"
-    f"kfold_results.csv"
-)
-
-df.to_csv(
-    csv_path,
-    index=False
-)
-
-
-# =========================
-# METRIC PLOT
-# =========================
-plot_metrics(csv_path)
-
-
-# =========================
-# DONE
-# =========================
-print("\n========================")
-print("EXPERIMENT FINISHED")
-print("========================")
-
-print(df)
-
-print(f"\nSaved to: {csv_path}")
+if __name__ == "__main__":
+    main()
