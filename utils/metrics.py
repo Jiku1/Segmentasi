@@ -140,23 +140,21 @@ def compute_dice(
 
 
 # =====================================================
-# BOUNDARY EXTRACTION
+# BOUNDARY EXTRACTION (Perbaikan Akurasi Multi-Kelas)
 # =====================================================
 def mask_to_boundary(mask):
-
+    """
+    Mengekstrak garis tepi (kontur) objek menggunakan Morfologi Gradient.
+    Sangat akurat untuk kelas objek kecil/tipis pada segmentasi korosi.
+    """
     mask = mask.astype(np.uint8)
-
     kernel = np.ones((3, 3), np.uint8)
-
-    erosion = cv2.erode(
-        mask,
-        kernel,
-        iterations=1
-    )
-
-    boundary = mask - erosion
-
+    
+    # Menggunakan MORPH_GRADIENT untuk mendapatkan outline tepi setebal 1 piksel
+    boundary = cv2.morphologyEx(mask, cv2.MORPH_GRADIENT, kernel)
+    
     return boundary
+
 
 
 # =====================================================

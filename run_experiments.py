@@ -1,6 +1,6 @@
 import os
-import glob
 import random
+import gc  # Tambahan wajib untuk pembersihan RAM
 import numpy as np
 import pandas as pd
 import torch
@@ -13,24 +13,26 @@ from datasets.corrosion import CorrosionDataset
 from models.unet import UNet
 from models.segformer import get_segformer
 from engine.loop import run_training_experiment
-from utils.visualization import plot_metrics
-from utils.device import get_device
+# Import fungsi visualisasi
+from utils.visualization import plot_metrics, visualize_prediction 
+
 
 
 # =====================================================
 # ENV
 # =====================================================
+os.environ["HF_HOME"] = "/workspace/.cache/huggingface"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 
 # =====================================================
-# CONFIG
+# FLAGS
 # =====================================================
-RUN_UNET = False
+RUN_UNET = True       # Kembalikan ke True jika Anda ingin menguji kedua model sekaligus
 RUN_SEGFORMER = True
 
 NUM_FOLDS = 5
-SEEDS = [42, 123, 999]
+SEEDS = [42]
 
 DEGRADATIONS = [
     "none", "noise", "blur",
@@ -41,35 +43,30 @@ DEGRADATIONS = [
 # =====================================================
 # DEVICE
 # =====================================================
-device, _ = get_device()
+device = torch.device(CONFIG["device"]) 
 print(f"\nDevice: {device}")
 
 
 # =====================================================
-# SAFE MKDIR
+# SAFE DIR
 # =====================================================
-def safe_mkdir(path):
-    os.makedirs(path, exist_ok=True)
-
-
-safe_mkdir(CONFIG["save_dir"])
-safe_mkdir("outputs")
-safe_mkdir("checkpoints")
+os.makedirs(CONFIG["save_dir"], exist_ok=True)
+os.makedirs("outputs", exist_ok=True)
+os.makedirs("checkpoints", exist_ok=True)
 
 
 # =====================================================
-# SEED CONTROL
+# SEED
 # =====================================================
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.cuda.manual_seed_all(seed)
 
 
 # =====================================================
-# LOAD DATA (ROBUST VERSION)
+# DATA LOADER
 # =====================================================
 def load_all_data():
 
@@ -87,24 +84,14 @@ def load_all_data():
             print(f"[SKIP] Missing folder: {split}")
             continue
 
-        img_files = sorted(glob.glob(f"{img_dir}/*"))
-        mask_files = sorted(glob.glob(f"{mask_dir}/*"))
+        img_files = sorted(os.listdir(img_dir))
+        mask_files = sorted(os.listdir(mask_dir))
 
-        print(f"\n[{split}] images: {len(img_files)} masks: {len(mask_files)}")
+        img_paths = [os.path.join(img_dir, f) for f in img_files]
+        mask_paths = [os.path.join(mask_dir, f) for f in mask_files]
 
-        def key(p):
-            return os.path.splitext(os.path.basename(p))[0]
-
-        img_map = {key(p): p for p in img_files}
-        mask_map = {key(p): p for p in mask_files}
-
-        keys = sorted(set(img_map.keys()) & set(mask_map.keys()))
-
-        print(f"matched pairs: {len(keys)}")
-
-        for k in keys:
-            imgs.append(img_map[k])
-            masks.append(mask_map[k])
+        imgs.extend(img_paths)
+        masks.extend(mask_paths)
 
     print("\nTOTAL DATASET:", len(imgs))
 
@@ -119,23 +106,23 @@ def load_all_data():
 # =====================================================
 def get_models():
     models = {}
+
     if RUN_UNET:
         models["unet"] = UNet
+
     if RUN_SEGFORMER:
         models["segformer"] = get_segformer
+
     return models
 
 
 # =====================================================
-# MAIN PIPELINE
+# MAIN
 # =====================================================
 def main():
 
     all_imgs, all_masks = load_all_data()
 
-    # =================================================
-    # 80/20 SPLIT (FIXED TEST SET)
-    # =================================================
     trainval_imgs, test_imgs, trainval_masks, test_masks = train_test_split(
         all_imgs,
         all_masks,
@@ -149,10 +136,9 @@ def main():
 
     results = []
 
-    # =================================================
-    # MODEL LOOP
-    # =================================================
-    for model_name, model_fn in get_models().items():
+    models = get_models()
+
+    for model_name, model_fn in models.items():
 
         print(f"\n================ MODEL: {model_name} ================")
 
@@ -160,11 +146,9 @@ def main():
 
             print(f"\n---- Degradation: {deg} ----")
 
-            fold_scores = []
+            fold_dice_scores = []
+            fold_boundary_scores = []
 
-            # =============================================
-            # K-FOLD ONLY ON TRAINVAL
-            # =============================================
             for fold, (tr_idx, val_idx) in enumerate(kfold.split(trainval_imgs)):
 
                 print(f"\nFold {fold+1}/{NUM_FOLDS}")
@@ -175,11 +159,9 @@ def main():
                 val_imgs = [trainval_imgs[i] for i in val_idx]
                 val_masks = [trainval_masks[i] for i in val_idx]
 
-                seed_scores = []
+                seed_dice = []
+                seed_boundary = []
 
-                # =========================================
-                # SEED LOOP
-                # =========================================
                 for seed in SEEDS:
 
                     set_seed(seed)
@@ -187,16 +169,30 @@ def main():
                     train_ds = CorrosionDataset(tr_imgs, tr_masks, degrade="none")
                     val_ds = CorrosionDataset(val_imgs, val_masks, degrade=deg)
 
-                    train_loader = DataLoader(train_ds, batch_size=4, shuffle=True)
-                    val_loader = DataLoader(val_ds, batch_size=4, shuffle=False)
+                    train_loader = DataLoader(
+                        train_ds,
+                        batch_size=CONFIG["batch_size"],
+                        shuffle=True,
+                        num_workers=CONFIG["num_workers"],
+                        pin_memory=CONFIG["pin_memory"]
+                    )
+
+                    val_loader = DataLoader(
+                        val_ds,
+                        batch_size=CONFIG["batch_size"],
+                        shuffle=False,
+                        num_workers=CONFIG["num_workers"],
+                        pin_memory=CONFIG["pin_memory"]
+                    )
 
                     model = model_fn(num_classes=4).to(device)
 
-                    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+                    optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG["lr"])
                     criterion = torch.nn.CrossEntropyLoss()
 
                     save_path = f"checkpoints/{model_name}_{deg}_f{fold}_s{seed}.pth"
 
+                    # Eksekusi Loop Training
                     output = run_training_experiment(
                         model,
                         train_loader,
@@ -205,37 +201,50 @@ def main():
                         criterion,
                         device,
                         CONFIG["epochs"],
-                        save_path
+                        save_path,
+                        patience=CONFIG["patience"]
                     )
 
-                    # =========================
-                    # SAFE READ
-                    # =========================
-                    best_iou = output.get("best_iou", None)
+                    # AMBIL METRIK DICE DAN BOUNDARY F1
+                    # (Menggunakan data evaluasi epoch terbaik dari 'output')
+                    # Jika output loop Anda mengembalikan history, ambil entri terakhir/terbaiknya
+                    best_epoch_idx = np.argmax(output["history"]["iou"])
+                    seed_dice.append(output["history"]["dice"][best_epoch_idx])
+                    seed_boundary.append(output["history"]["boundary_f1"][best_epoch_idx])
 
-                    if best_iou is None:
-                        best_iou = max(output["history"]["iou"])
+                    # =====================================================
+                    # CETAK GAMBAR KUALITATIF
+                    # =====================================================
+                    # Menghasilkan 10 sampel gambar hasil visualisasi segmentasi model ini
+                    visualize_prediction(model, model_name, val_ds, device)
 
-                    seed_scores.append(best_iou)
+                    # ULTRA CLEANUP: Menghapus seluruh objek komputasi agar RunPod bebas OOM
+                    del model, optimizer, criterion, train_loader, val_loader, train_ds, val_ds
+                    torch.cuda.empty_cache()
+                    gc.collect()
 
-                fold_scores.append(np.mean(seed_scores))
+                fold_dice_scores.append(np.mean(seed_dice))
+                fold_boundary_scores.append(np.mean(seed_boundary))
 
-            mean_iou = np.mean(fold_scores)
-            std_iou = np.std(fold_scores)
+            mean_dice = np.mean(fold_dice_scores)
+            std_dice = np.std(fold_dice_scores)
+            mean_boundary = np.mean(fold_boundary_scores)
+            std_boundary = np.std(fold_boundary_scores)
 
-            results.append([model_name, deg, mean_iou, std_iou])
+            # Masukkan ke array dengan susunan kolom terbaru
+            results.append([model_name, deg, mean_dice, std_dice, mean_boundary, std_boundary])
 
-            print(f"\nIoU: {mean_iou:.4f} ± {std_iou:.4f}")
+            print(f"\nDice: {mean_dice:.4f} ± {std_dice:.4f} | Boundary F1: {mean_boundary:.4f} ± {std_boundary:.4f}")
+            
+            # Backup data CSV secara real-time di setiap akhir siklus degradasi
+            pd.DataFrame(results, columns=["model", "degradation", "Dice_mean", "Dice_std", "Boundary_mean", "Boundary_std"]).to_csv("results_kfold.csv", index=False)
 
-    # =================================================
-    # SAVE RESULT
-    # =================================================
-    df = pd.DataFrame(results, columns=["model", "degradation", "IoU_mean", "IoU_std"])
+    # Simpan hasil akhir komparatif lengkap
+    df = pd.DataFrame(results, columns=["model", "degradation", "Dice_mean", "Dice_std", "Boundary_mean", "Boundary_std"])
+    df.to_csv("results_kfold.csv", index=False)
 
-    csv_path = "results_kfold.csv"
-    df.to_csv(csv_path, index=False)
-
-    plot_metrics(csv_path)
+    # Panggil fungsi plot untuk menggambar 2 kurva tren robustness otomatis
+    plot_metrics("results_kfold.csv")
 
     print("\nEXPERIMENT DONE")
     print(df)

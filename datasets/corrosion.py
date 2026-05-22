@@ -321,7 +321,7 @@ class CorrosionDataset(Dataset):
         img = (img - mean) / std
 
         # -------------------------------------------------
-        # TO TENSOR
+        # TO TENSOR (Gambar)
         # -------------------------------------------------
         img = torch.tensor(
             img,
@@ -329,13 +329,16 @@ class CorrosionDataset(Dataset):
         ).permute(2, 0, 1).contiguous()
 
         # -------------------------------------------------
-        # ENCODE MASK
+        # ENCODE MASK & TO TENSOR (Perbaikan Bug)
         # -------------------------------------------------
-        mask = self.encode_mask(mask)
-
-        mask = torch.tensor(
-            mask,
+        # 1. Jalankan fungsi encode_mask agar nilai piksel menjadi [0, 1, 2, 3]
+        encoded_mask = self.encode_mask(mask)
+        
+        # 2. Konversi ke bentuk Tensor PyTorch dengan tipe data Long
+        mask_tensor = torch.tensor(
+            encoded_mask,
             dtype=torch.long
         ).contiguous()
 
-        return img, mask
+        # 3. Kembalikan pasangan Gambar dan Masker yang sudah siap ditraining
+        return img, mask_tensor
