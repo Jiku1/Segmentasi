@@ -6,7 +6,12 @@ data/
 dataset/
 outputs/
 exper/
+checkpoints/
 *.png
 *.jpg
 *.pth
 *.weights
+*.csv
+result.py
+chart.py
+cekmask.py
