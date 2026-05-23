@@ -119,7 +119,7 @@ def visualize_prediction(
             pred_rgb = decode_mask(pred)
             overlay = overlay_mask(image, pred_rgb)
 
-            # Plot Berdampingan untuk Lampiran Bab IV
+            # Plot Berdampingan
             fig, ax = plt.subplots(1, 4, figsize=(18, 5))
 
             ax[0].imshow(image)
@@ -153,7 +153,7 @@ def visualize_prediction(
 
 
 # =====================================================
-# METRIC PLOT (Otomatis Dipanggil di Akhir run_experiments.py Anda)
+# METRIC PLOT (Otomatis Dipanggil di Akhir run_experiments.py)
 # =====================================================
 def plot_metrics(
     csv_path,

@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 
-# 1. Tentukan path ke salah satu folder masker Anda di RunPod
+# 1. Tentukan path 
 mask_dir = "data/train/masks"
 mask_files = os.listdir(mask_dir)
 

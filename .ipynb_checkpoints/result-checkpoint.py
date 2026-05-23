@@ -8,7 +8,7 @@ os.makedirs("./outputs", exist_ok=True)
 # =====================================================
 # LOAD RESULT CSV (Menggunakan file agregat hasil RunPod)
 # =====================================================
-# Menyesuaikan nama file dengan output skrip RunPod Anda sebelumnya
+# Menyesuaikan nama file dengan output skrip RunPod sebelumnya
 df = pd.read_csv("./result_kfold.csv")
 
 print("\n--- DATA AGREGAT EKSPERIMEN ---")
@@ -67,7 +67,7 @@ for model_name in df["model"].unique():
 plt.title("Perbandingan Boundary F1-Score terhadap Berbagai Skenario Degradasi Visual", fontsize=11, fontweight='bold', pad=10)
 plt.xlabel("Tipe Degradasi Visual", fontsize=10)
 plt.ylabel("Rata-Rata Boundary F1-Score", fontsize=10)
-plt.ylim(0.08, 0.15)  # Rentang sumbu Y disesuaikan dengan nilai 0.09 - 0.13 milik data Anda
+plt.ylim(0.08, 0.15)  # Rentang sumbu Y disesuaikan dengan nilai 0.09 - 0.13 milik data 
 plt.legend(frameon=True, facecolor='white', edgecolor='none')
 plt.grid(True, linestyle='--', alpha=0.6)
 plt.xticks(rotation=20)

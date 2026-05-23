@@ -68,4 +68,3 @@ plt.savefig("./outputs/degradation_slope_comparison.png", dpi=300)
 plt.close()
 
 print("\n[SUKSES] Grafik 'degradation_slope_comparison.png' berhasil disimpan!")
-print("Nilai di atas bisa langsung Anda salin untuk mengisi Tabel 4.4 di naskah Bab IV Anda.")

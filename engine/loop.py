@@ -56,7 +56,6 @@ def resize_logits(logits, masks):
 def compute_hybrid_loss(logits, masks):
     """
     Menghitung gabungan Cross Entropy & Dice Loss Multi-Class
-    Sesuai dengan janji analisis ketidakseimbangan kelas pada Bab III.
     """
     # 1. Cross Entropy Loss Standar untuk multi-kelas
     ce_loss_fn = torch.nn.CrossEntropyLoss()
@@ -147,7 +146,7 @@ def run_training_experiment(
     train_loader,
     val_loader,
     optimizer,
-    criterion, # Dipertahankan sebagai argumen agar tidak merusak skrip utama main.py Anda
+    criterion, # Dipertahankan sebagai argumen agar tidak merusak skrip utama main.py
     device,
     epochs,
     save_path,
@@ -198,8 +197,8 @@ def run_training_experiment(
         print(f"Val Loss    : {val_loss:.4f}")
         print(f"IoU (mIoU)  : {val_iou:.4f}")
         print(f"F1 Score    : {val_f1:.4f}")
-        print(f"Dice Coeff  : {val_dice:.4f}  <-- Target Utama BAB III")
-        print(f"Boundary F1 : {val_bf1:.4f}  <-- Target Utama BAB III")
+        print(f"Dice Coeff  : {val_dice:.4f}")
+        print(f"Boundary F1 : {val_bf1:.4f}")
 
         # =========================
         # SAVE BEST MODEL (Berdasarkan metrik IoU / Dice Terpilih)

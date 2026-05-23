@@ -23,7 +23,7 @@ RUN_SEGFORMER = True
 NUM_FOLDS = 5
 SEEDS = [42]
 
-# Daftar degradasi sesuai BAB III
+# Daftar degradasi
 DEGRADATIONS = ["none", "noise", "blur", "compression", "gamma", "shadow", "glare"]
 
 device = torch.device(CONFIG["device"]) 
@@ -100,7 +100,7 @@ def main():
             
             checkpoint_path = f"checkpoints/{model_name}_clean_f{fold}.pth"
 
-            # Jalankan training loop dengan Hybrid Loss otomatis dari loop.py Anda
+            # Jalankan training loop dengan Hybrid Loss otomatis dari loop.py
             output = run_training_experiment(
                 model, train_loader, val_loader, optimizer, criterion, 
                 device, CONFIG["epochs"], checkpoint_path, patience=CONFIG["patience"]
@@ -148,7 +148,7 @@ def main():
 
                 raw_results.append([model_name, deg, fold+1, deg_dice, deg_bf1])
                 
-                # Cetak Gambar Kualitatif Cacat Segmen untuk Bab IV
+                # Cetak Gambar Kualitatif Cacat Segmen
                 if fold == 0: # Cukup simpan visualisasi dari fold pertama agar disk tidak penuh
                     visualize_prediction(model, f"{model_name}_{deg}", val_ds, device)
 
@@ -161,10 +161,10 @@ def main():
         df_raw.to_csv("results_raw_kfold.csv", index=False)
 
     # -----------------------------------------------------------------
-    # TAHAP 3: AGREGASI OTOMATIS MENJADI MEAN & STD UNTUK TABEL BAB IV
+    # TAHAP 3: AGREGASI OTOMATIS MENJADI MEAN & STD
     # -----------------------------------------------------------------
     print("\n================ EXPERIMENT FINISHED ================")
-    print("Memproses ringkasan statistik akhir untuk Tabel Bab IV...")
+    print("Memproses ringkasan statistik akhir...")
     
     df_raw = pd.read_csv("results_raw_kfold.csv")
     df_summary = df_raw.groupby(["model", "degradation"]).agg(
